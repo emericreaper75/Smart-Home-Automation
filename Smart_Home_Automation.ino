@@ -1,0 +1,176 @@
+#include <Servo.h>
+
+// Pin Definitions
+#define IR_PIN D2
+#define RED_LED D8       
+#define BUZZ D5
+#define GREEN_LED D3        
+#define SERVO_PIN D4
+#define BUTTON_PIN D7     
+#define TOGGLE_PIN D6      
+#define BLUE_LED D0
+#define LDR_DO D1          
+
+Servo myServo;
+
+// Flags & States
+bool doorOpened = false;
+bool waitingToClose = false;
+bool isDark = false;
+bool isMotionDetected = false;
+bool securityMode = false;
+bool prevTempHigh = false;
+
+unsigned long openTime = 0;
+unsigned long lastMotionBuzzTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(IR_PIN, INPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZ, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+  pinMode(LDR_DO, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(TOGGLE_PIN, INPUT_PULLUP);
+
+  myServo.attach(SERVO_PIN);
+  myServo.write(90); // Neutral position
+
+  Serial.println("🔧 System Initialized");
+  delay(1000);
+}
+
+void loop() {
+  checkSecurityToggle();   // Check for toggle press
+
+  if (securityMode) {
+    // 🔒 Security Mode: Motion detection only
+    motion();
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BLUE_LED, LOW);
+    myServo.write(90); // Keep servo neutral
+  } else {
+    // 🟢 Normal Mode
+    static bool lastMotion = false;
+    static bool lastLight = false;
+    static bool lastTempHigh = false;
+
+    isMotionDetected = false;
+    isDark = false;
+
+    temperature(); // Sets prevTempHigh
+    motion();
+    light();
+    door();
+
+    if (isMotionDetected != lastMotion || isDark != lastLight || prevTempHigh != lastTempHigh) {
+      Serial.println("--- Measurements ---");
+      Serial.print("Motion: ");
+      Serial.println(isMotionDetected ? "Detected" : "Not Detected");
+      lastMotion = isMotionDetected;
+
+      Serial.print("Light: ");
+      Serial.println(isDark ? "Dark" : "Bright");
+      lastLight = isDark;
+
+      Serial.print("Temperature: ");
+      Serial.println(prevTempHigh ? "HIGH" : "NORMAL");
+      lastTempHigh = prevTempHigh;
+    }
+  }
+
+  delay(100);
+}
+
+// 🔁 Toggle security mode on button press
+void checkSecurityToggle() {
+  static bool lastState = HIGH;
+  static unsigned long lastToggleTime = 0;
+  const unsigned long debounceDelay = 200;
+
+  bool currentState = digitalRead(TOGGLE_PIN);
+  if (lastState == HIGH && currentState == LOW) {
+    if (millis() - lastToggleTime > debounceDelay) {
+      securityMode = !securityMode;
+      Serial.print("🔐 Security Mode: ");
+      Serial.println(securityMode ? "ENABLED" : "DISABLED");
+      lastToggleTime = millis();
+    }
+  }
+  lastState = currentState;
+}
+
+// 🔥 Raw NTC thermistor via voltage divider on A0
+void temperature() {
+  int tempValue = analogRead(A0);
+  if (tempValue < 400) {
+    digitalWrite(BLUE_LED, HIGH);
+    tone(BUZZ, 1000, 200); // Buzz 2s
+    prevTempHigh = true;
+  } else {
+    digitalWrite(BLUE_LED, LOW);
+    prevTempHigh = false;
+  }
+}
+
+// 🚨 Motion detection via PIR sensor
+void motion() {
+  int motionVal = digitalRead(IR_PIN);
+  isMotionDetected = (motionVal == LOW); // Active LOW
+
+  if (isMotionDetected) {
+    digitalWrite(RED_LED, HIGH);
+    if (millis() - lastMotionBuzzTime > 2000) {
+      tone(BUZZ, 4000, 200);
+      lastMotionBuzzTime = millis();
+    }
+    digitalWrite(RED_LED, LOW);
+  } else {
+    digitalWrite(RED_LED, LOW);
+  }
+}
+
+// 🌗 LDR-based light detection (digital)
+void light() {
+  bool lightValue = digitalRead(LDR_DO); // HIGH = dark if module has comparator
+  isDark = lightValue;
+  digitalWrite(GREEN_LED, isDark ? HIGH : LOW);
+}
+
+// 🚪 Servo-controlled door operation with button
+void door() {
+  if (digitalRead(BUTTON_PIN) == LOW && !doorOpened) {
+    myServo.write(0);       // Open
+    delay(1000);
+    myServo.write(90);      // Stop
+    digitalWrite(BLUE_LED, HIGH);
+    delay(200);
+    digitalWrite(BLUE_LED, LOW);
+
+    openTime = millis();
+    doorOpened = true;
+    waitingToClose = true;
+
+    delay(500);
+    while (digitalRead(BUTTON_PIN) == LOW) delay(10);
+  }
+
+  if (waitingToClose && millis() - openTime >= 10000) {
+    myServo.write(180);     // Close
+    delay(1000);
+    myServo.write(90);      // Stop
+    doorOpened = false;
+    waitingToClose = false;
+  }
+
+  // Failsafe close
+  if (doorOpened && !waitingToClose && millis() - openTime >= 20000) {
+    myServo.write(180);
+    delay(1000);
+    myServo.write(90);
+    doorOpened = false;
+  }
+}
